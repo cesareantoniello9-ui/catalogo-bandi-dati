@@ -36,9 +36,9 @@ const parametri = new URLSearchParams({
 });
 const INDIRIZZO = `https://www.incentivi.gov.it/solr/coredrupal/select?${parametri}`;
 
-// Il portale a volte non risponde ai server esteri: riprova fino a 5 volte
+// Il portale a volte non risponde ai server esteri: riprova fino a 3 volte
 async function scarica() {
-  for (let tentativo = 1; tentativo <= 5; tentativo++) {
+  for (let tentativo = 1; tentativo <= 3; tentativo++) {
     try {
       const risposta = await fetch(INDIRIZZO, {
         headers: {
@@ -53,13 +53,56 @@ async function scarica() {
       return dati;
     } catch (errore) {
       console.warn(`Tentativo ${tentativo} fallito: ${errore.message}`);
-      if (tentativo === 5) throw errore;
+      if (tentativo === 3) throw errore;
       await new Promise((attendi) => setTimeout(attendi, tentativo * 15_000));
     }
   }
 }
 
-const dati = await scarica();
+// Piano di riserva: se il portale rifiuta la connessione, usa la copia pubblica
+// del progetto open source Radar Bandi (stessi dati, stessa licenza IODL 2.0)
+const RISERVA = 'https://raw.githubusercontent.com/Marco1478/radar-bandi/main/data/bandi.json';
+const lista = (x) => (Array.isArray(x) ? x : x ? [x] : []);
+
+async function scaricaRiserva() {
+  const risposta = await fetch(RISERVA, { signal: AbortSignal.timeout(120_000) });
+  if (!risposta.ok) throw new Error(`riserva HTTP ${risposta.status}`);
+  const r = await risposta.json();
+  const docs = (r.bandi || []).map((b) => ({
+    ID_Incentivo: String(b.id ?? ''),
+    Titolo: b.title || '',
+    Obiettivo_Finalita: lista(b.scopes),
+    Data_apertura: b.open || null,
+    Data_chiusura: b.close || null,
+    Note_di_apertura_chiusura: b.closeNote || '',
+    Dimensioni: lista(b.sizes),
+    Tipologia_Soggetto: lista(b.subjects),
+    Forma_agevolazione: lista(b.forms),
+    Costi_Ammessi: lista(b.costs),
+    Agevolazione_Concedibile_min: b.aiutoMin || '',
+    Agevolazione_Concedibile_max: b.aiutoMax || '',
+    Settore_Attivita: lista(b.sectors),
+    Codici_ATECO: b.ateco || '',
+    Regioni: lista(b.regions),
+    Comuni: b.comuni && b.comuni !== 'Tutti' ? b.comuni : '',
+    Ambito_territoriale: lista(b.territory),
+    Soggetto_Concedente: b.ente || '',
+    Stanziamento_incentivo: b.budget || '',
+    Link_istituzionale: b.link || b.portal || '',
+    Data_ultimo_aggiornamento: b.updated || '',
+  }));
+  console.log(`Copia di riserva generata il ${r.meta?.generated}`);
+  return { origine: `copia Radar Bandi del ${r.meta?.generated}`, response: { numFound: r.meta?.totalInCatalog ?? docs.length, docs } };
+}
+
+let dati;
+try {
+  dati = await scarica();
+  dati.origine = 'portale incentivi.gov.it (diretto)';
+} catch (errore) {
+  console.warn(`Portale non raggiungibile (${errore.message}): uso la copia di riserva`);
+  dati = await scaricaRiserva();
+}
 const oggi = new Date().toISOString().slice(0, 10);
 const primo = (x) => (Array.isArray(x) ? x[0] : x);
 
@@ -75,6 +118,7 @@ await writeFile(
   JSON.stringify({
     generato: new Date().toISOString(),
     fonte: 'incentivi.gov.it (MIMIT) - licenza IODL 2.0',
+    origine: dati.origine,
     totale_portale: dati.response.numFound,
     response: { numFound: aperti.length, docs: aperti },
   }),
